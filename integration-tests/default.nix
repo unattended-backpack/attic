@@ -1,5 +1,5 @@
-{ pkgs ? import ./nixpkgs.nix
-, flake ? (import ../flake-compat.nix).defaultNix
+{ pkgs
+, flake
 }:
 
 let

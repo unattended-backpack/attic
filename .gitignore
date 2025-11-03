@@ -2,5 +2,16 @@
 
 /target
 result
+result-*
+/out
 
 fly.toml
+
+# Local configuration overrides
+.env
+.env.maintainer.local
+server.toml
+
+# Docker compose overrides
+docker-compose.override.yml
+.act-secrets/
