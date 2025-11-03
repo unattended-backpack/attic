@@ -1,0 +1,74 @@
+# Example Attic Server Configuration
+# Copy this file to `server.toml` and customize for your setup.
+#
+# Documentation: https://docs.attic.rs/
+
+# Server listen address.
+listen = "[::]:8080"
+
+# Allowed HTTP host headers (optional).
+# Set this to prevent Host header injection attacks
+# allowed_hosts = ["cache.example.com"]
+
+# API endpoint base URL (optional).
+# api-endpoint = "https://cache.example.com/"
+
+# Whether the uploader of cached data must prove their posession (optional).
+# require-proof-of-possession = false
+
+# Database configuration.
+[database]
+
+# Whether to perform heartbeats on database health (optional).
+heartbeat = true
+
+# SQLite
+url = "sqlite:///var/lib/attic/server.db?mode=rwc"
+
+# PostgreSQL
+# url = "postgresql://user:password@localhost/attic"
+
+# Storage backend
+[storage]
+
+# Local filesystem.
+type = "local"
+path = "/var/lib/attic/storage"
+
+# S3-compatible storage.
+# type = "s3"
+# region = ""
+# bucket = ""
+# endpoint = ""
+
+# Chunking configuration
+[chunking]
+
+# Minimum NAR size to enable chunking.
+nar-size-threshold = 65536
+
+# Minimum chunk size.
+min-size = 16384
+
+# Average chunk size.
+avg-size = 65536
+
+# Maximum chunk size.
+max-size = 262144
+
+# Compression configuration.
+# Options: "none", "brotli", "zstd", "xz"
+[compression]
+type = "zstd"
+
+# Compression level (1-9 for zstd, 1-22 for brotli).
+level = 3
+
+# Garbage collection.
+[garbage-collection]
+
+# How often to run garbage collection.
+interval = "12 hours"
+
+# Minimum age before a NAR can be collected.
+default-retention-period = "30 days"

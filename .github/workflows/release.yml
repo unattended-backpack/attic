@@ -1,0 +1,486 @@
+name: Create Release
+
+on:
+  push:
+    branches: [ master ]
+    paths-ignore:
+      - '**/*.md'
+      - '**/*.txt'
+      - 'docs/**'
+      - '.github/workflows/codeql.yml'
+
+permissions:
+  actions: read
+  contents: read
+  id-token: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  authenticate:
+    runs-on: [ self-hosted, actions-runner ]
+    outputs:
+      build-image: ${{ steps.config.outputs.build-image }}
+      runtime-image: ${{ steps.config.outputs.runtime-image }}
+    steps:
+      - name: Find build and runtime images
+        id: config
+        run: |
+          . /opt/github-runner/secrets/registry.env
+          BUILD_IMAGE="${BUILD_IMAGE:-unattended/petros:latest}"
+          RUNTIME_IMAGE="${RUNTIME_IMAGE:-debian:trixie-slim@sha256:66b37a5078a77098bfc80175fb5eb881a3196809242fd295b25502854e12cbec}"
+          echo "build-image=$BUILD_IMAGE" >> $GITHUB_OUTPUT
+          echo "runtime-image=$RUNTIME_IMAGE" >> $GITHUB_OUTPUT
+          echo "Using build image: $BUILD_IMAGE"
+          echo "Using runtime image: $RUNTIME_IMAGE"
+
+      - name: Log into DigitalOcean Container Registry
+        if: >-
+          startsWith(
+            steps.config.outputs.build-image,
+            'registry.digitalocean.com'
+          )
+        run: |
+          DO_TOKEN=$(cat /opt/github-runner/secrets/do_token)
+          echo "::add-mask::$DO_TOKEN"
+          echo "$DO_TOKEN" | \
+            docker login registry.digitalocean.com \
+            --username oauth2 \
+            --password-stdin
+
+  release:
+    needs: authenticate
+    runs-on: [ self-hosted, actions-runner ]
+    container:
+      image: ${{ needs.authenticate.outputs.build-image }}
+      options: --user 1000:1000 --group-add 960 --group-add 987
+      volumes:
+        - /var/run/docker.sock:/var/run/docker.sock
+        - /opt/github-runner/secrets:/opt/github-runner/secrets:ro
+    defaults:
+      run:
+        working-directory: ${{ github.workspace }}
+    outputs:
+      image-digest: ${{ steps.push-do.outputs.digest }}
+      build-timestamp: ${{ steps.metadata.outputs.timestamp }}
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@ff7abcd0c3c05ccf6adc123a8cd1fd4fb30fb493
+
+    - name: Generate build metadata
+      id: metadata
+      run: |
+        echo "timestamp=$(date +%s)" >> $GITHUB_OUTPUT
+        echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+
+    - name: Load secrets and configuration
+      id: load-config
+      run: |
+        # Load GitHub tokens from runner-local files
+        CI_GH_PAT=$(cat /opt/github-runner/secrets/ci_gh_pat)
+        CI_GH_CLASSIC_PAT=$(cat /opt/github-runner/secrets/ci_gh_classic_pat)
+        echo "::add-mask::$CI_GH_PAT"
+        echo "::add-mask::$CI_GH_CLASSIC_PAT"
+        echo "CI_GH_PAT=$CI_GH_PAT" >> $GITHUB_ENV
+        echo "CI_GH_CLASSIC_PAT=$CI_GH_CLASSIC_PAT" >> $GITHUB_ENV
+
+        # Load registry tokens from runner-local files
+        DO_TOKEN=$(cat /opt/github-runner/secrets/do_token)
+        DH_TOKEN=$(cat /opt/github-runner/secrets/dh_token)
+        echo "::add-mask::$DO_TOKEN"
+        echo "::add-mask::$DH_TOKEN"
+        echo "DO_TOKEN=$DO_TOKEN" >> $GITHUB_ENV
+        echo "DH_TOKEN=$DH_TOKEN" >> $GITHUB_ENV
+
+        # Load GPG secrets from runner-local files
+        GPG_PRIVATE_KEY=$(cat /opt/github-runner/secrets/gpg_private_key)
+        GPG_PASSPHRASE=$(cat /opt/github-runner/secrets/gpg_passphrase)
+        GPG_PUBLIC_KEY=$(cat /opt/github-runner/secrets/gpg_public_key)
+        echo "::add-mask::$GPG_PRIVATE_KEY"
+        echo "::add-mask::$GPG_PASSPHRASE"
+        echo "GPG_PRIVATE_KEY=$GPG_PRIVATE_KEY" >> $GITHUB_ENV
+        echo "GPG_PASSPHRASE=$GPG_PASSPHRASE" >> $GITHUB_ENV
+        echo "GPG_PUBLIC_KEY=$GPG_PUBLIC_KEY" >> $GITHUB_ENV
+
+        # Load public config from repository
+        . "$GITHUB_WORKSPACE/.env.maintainer"
+
+        # Export to environment for subsequent steps
+        echo "IMAGE_NAME=$IMAGE_NAME" >> $GITHUB_ENV
+
+        # Load registry configuration
+        . /opt/github-runner/secrets/registry.env
+
+        # Export to environment for subsequent steps
+        echo "DO_REGISTRY_NAME=$DO_REGISTRY_NAME" >> $GITHUB_ENV
+        echo "DH_USERNAME=$DH_USERNAME" >> $GITHUB_ENV
+
+    - name: Generate release notes
+      id: release-notes
+      uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd
+      with:
+        github-token: ${{ env.CI_GH_PAT }}
+        script: |
+          const generateReleaseNotes = require(
+            './.github/scripts/generate-release-notes.js'
+          );
+          const releaseNotes = await generateReleaseNotes({
+            github, context, core
+          });
+          core.setOutput('RELEASE_NOTES', releaseNotes);
+
+    - name: Run tests
+      id: tests
+      run: |
+        echo "Running tests using 'make test'..."
+
+        # Check if Makefile exists
+        if [ ! -f "Makefile" ]; then
+          echo "❌ No Makefile found in repository root"
+          echo "Please provide a Makefile with 'test' target"
+          exit 1
+        fi
+
+        # Check if test target exists
+        if ! make -n test &>/dev/null; then
+          echo "⚠️ Warning: No 'test' target found in Makefile"
+          echo "Skipping tests..."
+          echo "test_passed=skipped" >> $GITHUB_OUTPUT
+        else
+          # Run tests
+          if make test; then
+            echo "✅ Tests passed successfully"
+            echo "test_passed=true" >> $GITHUB_OUTPUT
+          else
+            echo "❌ Tests failed with exit code $?"
+            echo "test_passed=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+        fi
+
+    - name: Build native binaries
+      id: build-native
+      run: |
+        echo "Building binaries using Makefile..."
+
+        # Check if Makefile exists
+        if [ ! -f "Makefile" ]; then
+          echo "❌ No Makefile found in repository root"
+          echo "Please provide a Makefile that builds binaries and places them in ./out/"
+          exit 1
+        fi
+
+        # Run make and capture result
+        if make clean && make; then
+          echo "✅ Make completed successfully"
+
+          # Check if any binaries were actually produced in out/
+          if [ "$(ls -A ./out 2>/dev/null)" ]; then
+            echo "✅ Found binaries in ./out/"
+
+            # Get git short hash
+            GIT_HASH=$(git rev-parse --short HEAD)
+
+            # Compress binaries with platform-specific naming
+            echo "Compressing binaries..."
+            cd out
+            for file in *; do
+              if [ -f "$file" ]; then
+                # Skip if already compressed
+                if [[ ! "$file" =~ \.(tar\.gz|tgz|zip)$ ]]; then
+                  # Detect platform from binary (using 'file' command)
+                  PLATFORM=""
+                  FILE_INFO=$(file "$file" 2>/dev/null)
+
+                  # Detect OS and architecture
+                  if echo "$FILE_INFO" | grep -q "ELF.*Linux"; then
+                    if echo "$FILE_INFO" | grep -q "x86-64\|x86_64"; then
+                      PLATFORM="linux-amd64"
+                    elif echo "$FILE_INFO" | grep -q "aarch64\|ARM64"; then
+                      PLATFORM="linux-arm64"
+                    elif echo "$FILE_INFO" | grep -q "ARM"; then
+                      PLATFORM="linux-arm"
+                    else
+                      PLATFORM="linux-unknown"
+                    fi
+                  elif echo "$FILE_INFO" | grep -q "Mach-O"; then
+                    if echo "$FILE_INFO" | grep -q "x86_64"; then
+                      PLATFORM="darwin-amd64"
+                    elif echo "$FILE_INFO" | grep -q "arm64"; then
+                      PLATFORM="darwin-arm64"
+                    else
+                      PLATFORM="darwin-unknown"
+                    fi
+                  elif echo "$FILE_INFO" | grep -q "PE32\+"; then
+                    PLATFORM="windows-amd64"
+                  elif echo "$FILE_INFO" | grep -q "PE32"; then
+                    PLATFORM="windows-386"
+                  else
+                    PLATFORM="unknown-unknown"
+                  fi
+
+                  # Create tarball with new name: original_githash_platform.tar.gz
+                  TAR_NAME="${file}_${GIT_HASH}_${PLATFORM}.tar.gz"
+                  tar -czf "$TAR_NAME" "$file"
+                  echo "Compressed: $TAR_NAME"
+                fi
+              fi
+            done
+            cd ..
+
+            # List final artifacts
+            echo "Final artifacts:"
+            ls -la ./out/
+
+            echo "build_success=true" >> $GITHUB_OUTPUT
+          else
+            echo "❌ Make succeeded but no binaries found in ./out/"
+            echo "Please ensure your Makefile places binaries in the ./out/ directory"
+            echo "build_success=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+        else
+          echo "❌ Make failed with exit code $?"
+          echo "build_success=false" >> $GITHUB_OUTPUT
+          exit 1
+        fi
+
+    - name: Build Docker image
+      id: build
+      env:
+        DOCKER_BUILD_ARGS: ${{ env.DOCKER_BUILD_ARGS }}
+      run: |
+        echo "Building ${{ env.IMAGE_NAME }} image ..."
+
+        # Build the image.
+        docker build \
+          ${DOCKER_BUILD_ARGS} \
+          --build-arg BUILD_IMAGE="${{ needs.authenticate.outputs.build-image }}" \
+          --build-arg RUNTIME_IMAGE="${{ needs.authenticate.outputs.runtime-image }}" \
+          -f Dockerfile.ci \
+          -t ${{ env.IMAGE_NAME }}:${{ github.sha }} \
+          .
+        echo "build_success=true" >> $GITHUB_OUTPUT
+
+    - name: Log into DigitalOcean Container Registry
+      if: steps.build.outputs.build_success == 'true'
+      run: |
+        echo "${{ env.DO_TOKEN }}" | \
+          docker login registry.digitalocean.com \
+          --username oauth2 \
+          --password-stdin
+
+    - name: Push to DigitalOcean Container Registry
+      if: steps.build.outputs.build_success == 'true'
+      id: push-do
+      timeout-minutes: 30
+      run: |
+        DO_REG="registry.digitalocean.com"
+        DO_IMAGE="${DO_REG}/${{ env.DO_REGISTRY_NAME }}/${{ env.IMAGE_NAME }}"
+        docker tag "${{ env.IMAGE_NAME }}:${{ github.sha }}" \
+          "${DO_IMAGE}:${{ github.sha }}"
+        PUSH_OUTPUT=$(docker push "${DO_IMAGE}:${{ github.sha }}" 2>&1)
+        echo "$PUSH_OUTPUT"
+        DIGEST=$(echo "$PUSH_OUTPUT" | \
+          sed -n 's/.*digest: \([^ ]*\).*/\1/p' | head -1)
+        echo "digest=${DIGEST}" >> $GITHUB_OUTPUT
+
+    - name: Log into GitHub Container Registry
+      if: steps.build.outputs.build_success == 'true'
+      run: |
+        echo "${{ env.CI_GH_CLASSIC_PAT }}" | docker login ghcr.io \
+          --username "${{ github.actor }}" \
+          --password-stdin
+
+    - name: Push to GitHub Container Registry
+      if: steps.build.outputs.build_success == 'true'
+      id: push-ghcr
+      timeout-minutes: 30
+      run: |
+        GHCR_IMAGE="ghcr.io/${{ github.repository }}"
+        docker tag "${{ env.IMAGE_NAME }}:${{ github.sha }}" \
+          "${GHCR_IMAGE}:${{ github.sha }}"
+        PUSH_OUTPUT=$(docker push \
+          "${GHCR_IMAGE}:${{ github.sha }}" 2>&1)
+        echo "$PUSH_OUTPUT"
+        DIGEST=$(echo "$PUSH_OUTPUT" | \
+          sed -n 's/.*digest: \([^ ]*\).*/\1/p' | head -1)
+        echo "digest=${DIGEST}" >> $GITHUB_OUTPUT
+
+    - name: Log into Docker Hub
+      if: steps.build.outputs.build_success == 'true'
+      run: |
+        echo "${{ env.DH_TOKEN }}" | docker login \
+          --username "${{ env.DH_USERNAME }}" \
+          --password-stdin
+
+    - name: Push to Docker Hub
+      if: steps.build.outputs.build_success == 'true'
+      id: push-dh
+      timeout-minutes: 30
+      run: |
+        DH_IMAGE="${{ env.DH_USERNAME }}/${{ env.IMAGE_NAME }}"
+        docker tag "${{ env.IMAGE_NAME }}:${{ github.sha }}" \
+          "${DH_IMAGE}:${{ github.sha }}"
+        PUSH_OUTPUT=$(docker push "${DH_IMAGE}:${{ github.sha }}" 2>&1)
+        echo "$PUSH_OUTPUT"
+        DIGEST=$(echo "$PUSH_OUTPUT" | \
+          sed -n 's/.*digest: \([^ ]*\).*/\1/p' | head -1)
+        echo "digest=${DIGEST}" >> $GITHUB_OUTPUT
+
+    - name: Verify consistent digests
+      id: verify-digests
+      if: steps.build.outputs.build_success == 'true'
+      run: |
+        DO_DIGEST="${{ steps.push-do.outputs.digest }}"
+        GHCR_DIGEST="${{ steps.push-ghcr.outputs.digest }}"
+        DH_DIGEST="${{ steps.push-dh.outputs.digest }}"
+
+        echo "Registry Digests (may differ due to manifest format):"
+        echo "  DO:   ${DO_DIGEST}"
+        echo "  GHCR: ${GHCR_DIGEST}"
+        echo "  DH:   ${DH_DIGEST}"
+        echo ""
+
+        # Verify all pushes succeeded
+        if [ -z "${DO_DIGEST}" ] || \
+           [ -z "${GHCR_DIGEST}" ] || \
+           [ -z "${DH_DIGEST}" ]; then
+          echo "ERROR: One or more pushes failed to return a digest!"
+          echo "image_match=false" >> $GITHUB_OUTPUT
+          exit 1
+        fi
+
+        # Get local image ID for release notes
+        LOCAL_ID=$(docker inspect \
+          ${{ env.IMAGE_NAME }}:${{ github.sha }} \
+          --format='{{.Id}}')
+        echo "Local image ID: ${LOCAL_ID}"
+        echo ""
+
+        echo "✅ All pushes completed successfully."
+        echo "Digests will be GPG signed for verification."
+        echo "image_match=true" >> $GITHUB_OUTPUT
+        echo "image_id=${LOCAL_ID}" >> $GITHUB_OUTPUT
+
+    - name: Sign images with cosign
+      id: cosign-sign
+      if: steps.verify-digests.outputs.image_match == 'true'
+      env:
+        COSIGN_EXPERIMENTAL: "true"
+      run: |
+        echo "Signing container images with cosign ..."
+
+        # Sign GHCR
+        echo "Signing GHCR image ..."
+        cosign sign --yes \
+          "ghcr.io/${{ github.repository }}@${{ steps.push-ghcr.outputs.digest }}"
+        echo "✅ Signed GHCR image"
+
+        # Sign Docker Hub
+        echo "Signing Docker Hub image ..."
+        cosign sign --yes \
+          "${{ env.DH_USERNAME }}/${{ env.IMAGE_NAME }}@${{ steps.push-dh.outputs.digest }}"
+        echo "✅ Signed Docker Hub image"
+
+        # Sign DigitalOcean
+        echo "Signing DigitalOcean image ..."
+        cosign sign --yes \
+          "registry.digitalocean.com/${{ env.DO_REGISTRY_NAME }}/${{ env.IMAGE_NAME }}@${{ steps.push-do.outputs.digest }}"
+        echo "✅ Signed DigitalOcean image"
+
+        echo "cosign_success=true" >> $GITHUB_OUTPUT
+
+    - name: Sign release artifacts with GPG
+      id: gpg-sign
+      if: steps.cosign-sign.outputs.cosign_success == 'true'
+      env:
+        BUILD_TIMESTAMP: ${{ steps.metadata.outputs.timestamp }}
+        BUILD_SHA_SHORT: ${{ steps.metadata.outputs.sha_short }}
+        DO_DIGEST: ${{ steps.push-do.outputs.digest }}
+        GHCR_DIGEST: ${{ steps.push-ghcr.outputs.digest }}
+        DH_DIGEST: ${{ steps.push-dh.outputs.digest }}
+      run: sh .github/scripts/sign-release-artifacts.sh
+
+    - name: Create release
+      id: create-release
+      if: steps.gpg-sign.outputs.signing_success == 'true'
+      uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd
+      env:
+        BUILD_TIMESTAMP: ${{ steps.metadata.outputs.timestamp }}
+        BUILD_SHA_SHORT: ${{ steps.metadata.outputs.sha_short }}
+        DO_DIGEST: ${{ steps.push-do.outputs.digest }}
+        GHCR_DIGEST: ${{ steps.push-ghcr.outputs.digest }}
+        DH_DIGEST: ${{ steps.push-dh.outputs.digest }}
+        IMAGE_MATCH: ${{ steps.verify-digests.outputs.image_match }}
+        IMAGE_ID: ${{ steps.verify-digests.outputs.image_id }}
+        RELEASE_NOTES: ${{ steps.release-notes.outputs.RELEASE_NOTES }}
+      with:
+        github-token: ${{ env.CI_GH_PAT }}
+        script: |
+          const createRelease = require('./.github/scripts/create-release.js');
+          await createRelease({ github, context, core });
+
+    # After registry consistency is verified, add the 'latest' tag.
+    - name: Tag as latest after verification
+      if: steps.create-release.outputs.RELEASE_SUCCESS == 'true'
+      run: |
+        # Tag and push 'latest' to each registry.
+        # DO Registry
+        DO_REG="registry.digitalocean.com"
+        DO_IMAGE="${DO_REG}/${{ env.DO_REGISTRY_NAME }}/${{ env.IMAGE_NAME }}"
+        docker tag "${DO_IMAGE}:${{ github.sha }}" "${DO_IMAGE}:latest"
+        docker push "${DO_IMAGE}:latest"
+
+        # GHCR
+        GHCR_IMAGE="ghcr.io/${{ github.repository }}"
+        docker tag "${GHCR_IMAGE}:${{ github.sha }}" \
+          "${GHCR_IMAGE}:latest"
+        docker push "${GHCR_IMAGE}:latest"
+
+        # Docker Hub
+        DH_IMAGE="${{ env.DH_USERNAME }}/${{ env.IMAGE_NAME }}"
+        docker tag "${DH_IMAGE}:${{ github.sha }}" \
+          "${DH_IMAGE}:latest"
+        docker push "${DH_IMAGE}:latest"
+        echo "✅ Successfully tagged all registries with 'latest'"
+
+    - name: Perform rollback on failure
+      id: rollback
+      if: >-
+        failure() &&
+        steps.build.outputs.build_success == 'true'
+      env:
+        DO_DIGEST: ${{ steps.push-do.outputs.digest }}
+        GHCR_DIGEST: ${{ steps.push-ghcr.outputs.digest }}
+        DH_DIGEST: ${{ steps.push-dh.outputs.digest }}
+      run: sh .github/scripts/rollback-registries.sh
+
+    - name: Create rollback record
+      if: >-
+        failure() &&
+        steps.build.outputs.build_success == 'true'
+      uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd
+      continue-on-error: true
+      env:
+        BUILD_SHA_SHORT: ${{ steps.metadata.outputs.sha_short }}
+        BUILD_TIMESTAMP: ${{ steps.metadata.outputs.timestamp }}
+        BUILD_SUCCESS: ${{ steps.build.outputs.build_success }}
+        RELEASE_SUCCESS: ${{ steps.create-release.outputs.RELEASE_SUCCESS }}
+        DO_DIGEST: ${{ steps.push-do.outputs.digest }}
+        GHCR_DIGEST: ${{ steps.push-ghcr.outputs.digest }}
+        DH_DIGEST: ${{ steps.push-dh.outputs.digest }}
+        DO_ROLLBACK_SUCCESS: ${{ steps.rollback.outputs.do_rollback_success }}
+        GHCR_ROLLBACK_SUCCESS: >-
+          ${{ steps.rollback.outputs.ghcr_rollback_success }}
+        DH_ROLLBACK_SUCCESS: ${{ steps.rollback.outputs.dh_rollback_success }}
+      with:
+        github-token: ${{ env.CI_GH_CLASSIC_PAT }}
+        script: |
+          const createRollbackRecord = require(
+            './.github/scripts/create-rollback-record.js'
+          );
+          await createRollbackRecord({ github, context, core });

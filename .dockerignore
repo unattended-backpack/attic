@@ -1,0 +1,37 @@
+# Build artifacts
+target/
+result
+result-*
+
+# Git
+.git/
+.github/
+.gitignore
+.gitattributes
+
+# Nix
+*.nix
+flake/
+flake.lock
+.envrc
+
+# CI/CD
+.ci/
+garnix.yaml
+renovate.json
+
+# Documentation
+README.md
+LICENSE
+book/
+*.md
+
+# Development
+.editorconfig
+justfile
+
+# Tests
+integration-tests/
+
+# NixOS modules
+nixos/

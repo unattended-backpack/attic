@@ -10,10 +10,6 @@ let
 
   cfg = config.services.atticd;
 
-  # unused when the entrypoint is flake
-  flake = import ../flake-compat.nix;
-  overlay = flake.defaultNix.overlays.default;
-
   format = pkgs.formats.toml { };
 
   checkedConfigFile =
@@ -152,15 +148,6 @@ in
         default = "monolithic";
       };
 
-      # Internal flags
-      useFlakeCompatOverlay = lib.mkOption {
-        description = ''
-          Whether to insert the overlay with flake-compat.
-        '';
-        type = types.bool;
-        internal = true;
-        default = true;
-      };
     };
   };
 
@@ -261,10 +248,6 @@ in
 
     environment.systemPackages = [
       atticadmWrapper
-    ];
-
-    nixpkgs.overlays = lib.mkIf cfg.useFlakeCompatOverlay [
-      overlay
     ];
   };
 }
