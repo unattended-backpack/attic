@@ -174,7 +174,7 @@ jobs:
         fi
 
         # Run make and capture result
-        if make clean && make; then
+        if make; then
           echo "✅ Make completed successfully"
 
           # Check if any binaries were actually produced in out/
