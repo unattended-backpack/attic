@@ -163,6 +163,8 @@ jobs:
 
     - name: Build native binaries
       id: build-native
+      env:
+        CARGO_HOME: ${{ github.workspace }}/.cargo
       run: |
         echo "Building binaries using Makefile..."
 
@@ -252,6 +254,7 @@ jobs:
       id: build
       env:
         DOCKER_BUILD_ARGS: ${{ env.DOCKER_BUILD_ARGS }}
+        DOCKER_CONFIG: ${{ github.workspace }}/.docker
       run: |
         echo "Building ${{ env.IMAGE_NAME }} image ..."
 
@@ -267,6 +270,8 @@ jobs:
 
     - name: Log into DigitalOcean Container Registry
       if: steps.build.outputs.build_success == 'true'
+      env:
+        DOCKER_CONFIG: ${{ github.workspace }}/.docker
       run: |
         echo "${{ env.DO_TOKEN }}" | \
           docker login registry.digitalocean.com \
@@ -277,6 +282,8 @@ jobs:
       if: steps.build.outputs.build_success == 'true'
       id: push-do
       timeout-minutes: 30
+      env:
+        DOCKER_CONFIG: ${{ github.workspace }}/.docker
       run: |
         DO_REG="registry.digitalocean.com"
         DO_IMAGE="${DO_REG}/${{ env.DO_REGISTRY_NAME }}/${{ env.IMAGE_NAME }}"
@@ -290,6 +297,8 @@ jobs:
 
     - name: Log into GitHub Container Registry
       if: steps.build.outputs.build_success == 'true'
+      env:
+        DOCKER_CONFIG: ${{ github.workspace }}/.docker
       run: |
         echo "${{ env.CI_GH_CLASSIC_PAT }}" | docker login ghcr.io \
           --username "${{ github.actor }}" \
@@ -299,6 +308,8 @@ jobs:
       if: steps.build.outputs.build_success == 'true'
       id: push-ghcr
       timeout-minutes: 30
+      env:
+        DOCKER_CONFIG: ${{ github.workspace }}/.docker
       run: |
         GHCR_IMAGE="ghcr.io/${{ github.repository }}"
         docker tag "${{ env.IMAGE_NAME }}:${{ github.sha }}" \
@@ -312,6 +323,8 @@ jobs:
 
     - name: Log into Docker Hub
       if: steps.build.outputs.build_success == 'true'
+      env:
+        DOCKER_CONFIG: ${{ github.workspace }}/.docker
       run: |
         echo "${{ env.DH_TOKEN }}" | docker login \
           --username "${{ env.DH_USERNAME }}" \
@@ -321,6 +334,8 @@ jobs:
       if: steps.build.outputs.build_success == 'true'
       id: push-dh
       timeout-minutes: 30
+      env:
+        DOCKER_CONFIG: ${{ github.workspace }}/.docker
       run: |
         DH_IMAGE="${{ env.DH_USERNAME }}/${{ env.IMAGE_NAME }}"
         docker tag "${{ env.IMAGE_NAME }}:${{ github.sha }}" \
@@ -334,6 +349,8 @@ jobs:
     - name: Verify consistent digests
       id: verify-digests
       if: steps.build.outputs.build_success == 'true'
+      env:
+        DOCKER_CONFIG: ${{ github.workspace }}/.docker
       run: |
         DO_DIGEST="${{ steps.push-do.outputs.digest }}"
         GHCR_DIGEST="${{ steps.push-ghcr.outputs.digest }}"
@@ -371,6 +388,7 @@ jobs:
       if: steps.verify-digests.outputs.image_match == 'true'
       env:
         COSIGN_EXPERIMENTAL: "true"
+        DOCKER_CONFIG: ${{ github.workspace }}/.docker
       run: |
         echo "Signing container images with cosign ..."
 
@@ -403,6 +421,7 @@ jobs:
         DO_DIGEST: ${{ steps.push-do.outputs.digest }}
         GHCR_DIGEST: ${{ steps.push-ghcr.outputs.digest }}
         DH_DIGEST: ${{ steps.push-dh.outputs.digest }}
+        DOCKER_CONFIG: ${{ github.workspace }}/.docker
       run: sh .github/scripts/sign-release-artifacts.sh
 
     - name: Create release
@@ -427,6 +446,8 @@ jobs:
     # After registry consistency is verified, add the 'latest' tag.
     - name: Tag as latest after verification
       if: steps.create-release.outputs.RELEASE_SUCCESS == 'true'
+      env:
+        DOCKER_CONFIG: ${{ github.workspace }}/.docker
       run: |
         # Tag and push 'latest' to each registry.
         # DO Registry
@@ -457,6 +478,7 @@ jobs:
         DO_DIGEST: ${{ steps.push-do.outputs.digest }}
         GHCR_DIGEST: ${{ steps.push-ghcr.outputs.digest }}
         DH_DIGEST: ${{ steps.push-dh.outputs.digest }}
+        DOCKER_CONFIG: ${{ github.workspace }}/.docker
       run: sh .github/scripts/rollback-registries.sh
 
     - name: Create rollback record
