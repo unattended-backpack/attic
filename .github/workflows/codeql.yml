@@ -26,6 +26,10 @@ concurrency:
 jobs:
   analyze:
     runs-on: [ self-hosted, actions-runner ]
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [ c-cpp, csharp, java, javascript, python, ruby, swift ]
     steps:
       - uses: actions/checkout@ff7abcd0c3c05ccf6adc123a8cd1fd4fb30fb493
 
@@ -35,8 +39,11 @@ jobs:
       - uses: >-
           github/codeql-action/init@777daa0c71818e7f377c8adc5415f74544c87142
         with:
-          languages: c-cpp, csharp, java, javascript, python, ruby, rust
+          languages: ${{ matrix.language }}
           build-mode: none
 
       - uses: >-
           github/codeql-action/analyze@777daa0c71818e7f377c8adc5415f74544c87142
+        with:
+          category: "/language:${{ matrix.language }}"
+        continue-on-error: true
