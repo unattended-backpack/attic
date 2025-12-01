@@ -14,30 +14,62 @@
   @returns {Promise<void>}
 */
 module.exports = async ({ github, context, core }) => {
+
   // Get workflow data from environment
   const shaShort = process.env.BUILD_SHA_SHORT;
   const timestamp = process.env.BUILD_TIMESTAMP;
   const buildSuccess = process.env.BUILD_SUCCESS === 'true';
   const releaseSuccess = process.env.RELEASE_SUCCESS === 'true';
 
-  const doDigest = process.env.DO_DIGEST;
-  const ghcrDigest = process.env.GHCR_DIGEST;
-  const dhDigest = process.env.DH_DIGEST;
+  // Dynamically discover all images from environment variables.
+  const images = {};
+  const envKeys = Object.keys(process.env);
+  for (const key of envKeys) {
+    const match = key.match(/^(.+)_DO_DIGEST$/);
+    if (match) {
+      const imageName = match[1];
+      images[imageName] = {
+        doDigest: process.env[`${imageName}_DO_DIGEST`],
+        ghcrDigest: process.env[`${imageName}_GHCR_DIGEST`],
+        dhDigest: process.env[`${imageName}_DH_DIGEST`],
+        doRollback: process.env[`${imageName}_DO_ROLLBACK_SUCCESS`] === 'true',
+        ghcrRollback: process.env[`${imageName}_GHCR_ROLLBACK_SUCCESS`] === 'true',
+        dhRollback: process.env[`${imageName}_DH_ROLLBACK_SUCCESS`] === 'true'
+      };
+    }
+  }
+  const imageNames = Object.keys(images);
 
-  const doRollback = process.env.DO_ROLLBACK_SUCCESS === 'true';
-  const ghcrRollback = process.env.GHCR_ROLLBACK_SUCCESS === 'true';
-  const dhRollback = process.env.DH_ROLLBACK_SUCCESS === 'true';
+  // Generate rollback summary for all discovered images.
+  let rollbackSummary = '';
+  for (const imageName of imageNames.sort()) {
+    const image = images[imageName];
+    const imageTitle = imageName.charAt(0).toUpperCase() + imageName.slice(1);
+    const doRollbackText =
+      `- DOCR Rollback: ${image.doRollback ? '✅' : '❌ manual intervention required.'}`;
+    const ghcrRollbackText =
+      `- GHCR Rollback: ${image.ghcrRollback ? '✅' : '❌ manual intervention required.'}`;
+    const dhRollbackText =
+      `- DHCR Rollback: ${image.dhRollback ? '✅' : '❌ manual intervention required.'}`;
 
-  const doRollbackText =
-    `- DOCR Rollback: ${doRollback ? '✅' : '❌ manual intervention required.'}`;
-  const ghcrRollbackText =
-    `- GHCR Rollback: ${ghcrRollback ? '✅' : '❌ manual intervention required.'}`;
-  const dhRollbackText =
-    `- DHCR Rollback: ${dhRollback ? '✅' : '❌ manual intervention required.'}`;
+    // Add this image's details to the rollback summary.
+    rollbackSummary += `## ${imageTitle} Status
 
+### Registry Pushes
+- DOCR: ${image.doDigest ? `✅ \`${image.doDigest}\`` : '❌' }
+- GHCR: ${image.ghcrDigest ? `✅ \`${image.ghcrDigest}\`` : '❌' }
+- DHCR: ${image.dhDigest ? `✅ \`${image.dhDigest}\`` : '❌' }
+
+### Registry Rollbacks
+${image.doDigest ? doRollbackText : '' }
+${image.ghcrDigest ? ghcrRollbackText : '' }
+${image.dhDigest ? dhRollbackText : '' }
+    `;
+  }
+
+  // Create the rollback issue.
   const workflowUrl = `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions`;
   const actor = process.env.GITHUB_ACTOR;
-
   await github.rest.issues.create({
     owner: context.repo.owner,
     repo: context.repo.repo,
@@ -51,19 +83,11 @@ The automated release process attempts to build the project, push it to various 
 2. If successful and consistent pushes to all container registries cannot be verified, a warning-laden partial release of the project is produced. The automated release process will attempt to restore container registry consistency by rolling back the mismatched state.
 3. In the event that a registry push succeeded but its corresponding rollback failed, you will need to manually intervene to ensure consistent images between container registries.
 
-### Build Status
+## Build Status
 - ${buildSuccess ? '✅ The build succeeded.' : '❌ The build failed.'}
-- ${releaseSuccess ? '⚠️ A partial release was made.' : '✅ No release was made.'}
+- ${releaseSuccess ? '⚠️ A release was made.' : '✅ No release was made.'}
 
-### Registry Pushes
-- DOCR: ${doDigest ? `✅ \`${doDigest}\`` : '❌' }
-- GHCR: ${ghcrDigest ? `✅ \`${ghcrDigest}\`` : '❌' }
-- DHCR: ${dhDigest ? `✅ \`${dhDigest}\`` : '❌' }
-
-### Registry Rollbacks
-${doDigest ? doRollbackText : '' }
-${ghcrDigest ? ghcrRollbackText : '' }
-${dhDigest ? dhRollbackText : '' }
+${rollbackSummary}
 `,
     labels: ['release-failure', 'needs-investigation']
   });

@@ -16,11 +16,8 @@
 #   - IMAGE_NAME: Image name
 #   - GITHUB_SHA: Git commit SHA
 #   - GITHUB_REPOSITORY: Repository name (owner/repo)
-
 set -e
-
-echo "⚠️ Inconsistency detected. Attempting to rollback..."
-echo "Will attempt to delete images from registries to maintain consistency."
+echo "Attempting to rollback $ROLLBACK_IMAGE_KEY ..."
 
 # Rollback DO if needed.
 DO_ROLLBACK_SUCCESS=true
@@ -47,9 +44,10 @@ GHCR_ROLLBACK_SUCCESS=true
 if [ -n "$GHCR_DIGEST" ]; then
   echo "Must rollback GHCR..."
 
-  # Extract owner and package name.
+  # Extract owner and construct package name with repository namespace
   REPO_OWNER=$(echo "$GITHUB_REPOSITORY" | cut -d'/' -f1)
-  PACKAGE_NAME=$(echo "$GITHUB_REPOSITORY" | cut -d'/' -f2)
+  REPO_NAME=$(echo "$GITHUB_REPOSITORY" | cut -d'/' -f2)
+  PACKAGE_NAME="${REPO_NAME}%2F${IMAGE_NAME}"  # URL-encoded path: repo/image
   echo "Looking for package: $REPO_OWNER/$PACKAGE_NAME"
 
   # Try org first, fall back to user.
@@ -152,11 +150,14 @@ if [ -n "$DH_DIGEST" ]; then
   fi
 fi
 
-# Output the final rollback status.
-echo "do_rollback_success=${DO_ROLLBACK_SUCCESS}" >> $GITHUB_OUTPUT
-echo "ghcr_rollback_success=${GHCR_ROLLBACK_SUCCESS}" >> $GITHUB_OUTPUT
-echo "dh_rollback_success=${DH_ROLLBACK_SUCCESS}" >> $GITHUB_OUTPUT
+# Output the final rollback status to GITHUB_ENV with image-specific keys
+if [ -n "$GITHUB_ENV" ] && [ -n "$ROLLBACK_IMAGE_KEY" ]; then
+  echo "${ROLLBACK_IMAGE_KEY}_DO_ROLLBACK_SUCCESS=${DO_ROLLBACK_SUCCESS}" >> $GITHUB_ENV
+  echo "${ROLLBACK_IMAGE_KEY}_GHCR_ROLLBACK_SUCCESS=${GHCR_ROLLBACK_SUCCESS}" >> $GITHUB_ENV
+  echo "${ROLLBACK_IMAGE_KEY}_DH_ROLLBACK_SUCCESS=${DH_ROLLBACK_SUCCESS}" >> $GITHUB_ENV
+fi
 
+# Create useful action logs.
 echo "========================================="
 if [ "$DO_ROLLBACK_SUCCESS" = true ]; then
   echo "✅ DO rollback success."
@@ -173,6 +174,3 @@ if [ "$DH_ROLLBACK_SUCCESS" = true ]; then
 else
   echo "❌ DH rollback failure; manual intervention required."
 fi
-
-# Always fail, to mark our workflow as failed.
-exit 1
