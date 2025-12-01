@@ -1,6 +1,6 @@
 ## Attic
 
-Attic is a [self-hostable Nix Binary Cache](https://github.com/zhaofengli/attic). We make extensive use of it to maintain a fully independent supply chain of Nix packages that we have built and cached. We maintain [Granary](https://github.com/unattended-backpack/granary), which is our simple solution for making it easy to host an attic server. Upstream usage documentation is maintained at [docs.attic.rs](https://docs.attic.rs/).
+Attic is a [self-hostable Nix Binary Cache](https://github.com/unattended-backpack/attic). We make extensive use of it to maintain a fully independent supply chain of Nix packages that we have built and cached. We maintain [Granary](https://github.com/unattended-backpack/granary), which is our simple solution for making it easy to host an attic server. Upstream usage documentation is maintained at [docs.attic.rs](https://docs.attic.rs/).
 
 ## Building
 
